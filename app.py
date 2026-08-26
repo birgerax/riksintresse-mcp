@@ -1,6 +1,5 @@
 import os
 import requests
-from typing import Optional
 from flask import Flask, request, jsonify
 
 BOVERKET_BASE = (
@@ -65,13 +64,13 @@ def list_riksintresse_typer():
 def get_riksintressen_vid_koordinat(latitud, longitud):
     features = _identify(latitud, longitud)
     if features and "_error" in features[0]:
-        return f"⚠️ Fel: {features[0]['_error']}"
+        return f"Fel: {features[0]['_error']}"
     if not features:
-        return f"Inga riksintressen vid {latitud:.5f}°N, {longitud:.5f}°E."
+        return f"Inga riksintressen vid {latitud:.5f}N, {longitud:.5f}E."
     by_layer = {}
     for f in features:
         by_layer.setdefault(f.get("layerName", "Okänd"), []).append(f.get("attributes", {}))
-    lines = [f"## Riksintressen vid {latitud:.5f}°N, {longitud:.5f}°E\n",
+    lines = [f"## Riksintressen vid {latitud:.5f}N, {longitud:.5f}E\n",
              f"**{len(features)} förekomster** i **{len(by_layer)} kategorier**\n"]
     for layer, attrs_list in sorted(by_layer.items()):
         lines.append(f"\n### {layer}")
@@ -80,8 +79,8 @@ def get_riksintressen_vid_koordinat(latitud, longitud):
             lines.extend(rows if rows else ["  *(inga ytterligare attribut)*"])
     if len(by_layer) > 1:
         keys = sorted(by_layer.keys())
-        pairs = [f"- **{a}** ↔ **{b}**" for i, a in enumerate(keys) for b in keys[i+1:]]
-        lines += ["\n### ⚠️ Potentiella konflikter\n"] + pairs
+        pairs = [f"- **{a}** vs **{b}**" for i, a in enumerate(keys) for b in keys[i+1:]]
+        lines += ["\n### Potentiella konflikter\n"] + pairs
     lines.append("\n*Källa: Boverkets riksintressekarta*")
     return "\n".join(lines)
 
@@ -95,10 +94,10 @@ def analysera_konflikter_i_omrade(lat_min, lon_min, lat_max, lon_max):
             if f.get("layerName") not in existing and "_error" not in f:
                 features.append(f); existing.add(f.get("layerName"))
     if features and "_error" in features[0]:
-        return f"⚠️ Fel: {features[0]['_error']}"
+        return f"Fel: {features[0]['_error']}"
     layer_names = sorted({f.get("layerName", "Okänd") for f in features if "_error" not in f})
     lines = ["## Riksintresseanalys\n",
-             f"**Koordinater:** {lat_min:.2f}–{lat_max:.2f}°N, {lon_min:.2f}–{lon_max:.2f}°E"]
+             f"**Koordinater:** {lat_min:.2f}-{lat_max:.2f}N, {lon_min:.2f}-{lon_max:.2f}E"]
     if not layer_names:
         return "\n".join(lines) + "\nInga riksintressen hittades."
     lines.append("### Riksintressetyper i området\n")
@@ -110,16 +109,18 @@ def analysera_konflikter_i_omrade(lat_min, lon_min, lat_max, lon_max):
         pairs = []
         for i, a in enumerate(layer_names):
             for b in layer_names[i+1:]:
-                tag = " 🔴 *(totalförsvar – överordnat)*" if any("försvar" in x.lower() for x in [a, b]) else ""
-                pairs.append(f"- **{a}** ↔ **{b}**{tag}")
-        lines += [f"\n### ⚠️ Avvägningssituationer ({len(pairs)} par)\n"] + pairs
+                tag = " (totalförsvar – överordnat)" if any("försvar" in x.lower() for x in [a, b]) else ""
+                pairs.append(f"- **{a}** vs **{b}**{tag}")
+        lines += [f"\n### Avvägningssituationer ({len(pairs)} par)\n"] + pairs
     lines.append("\n*Källa: Boverkets riksintressekarta*")
     return "\n".join(lines)
 
 def forklara_riksintressesystemet(fraga=None):
-    text = """## Riksintressesystemet\n
-| Kapitel | Innehåll |\n|---|---|\n| MB 3 kap | Myndighetspekade riksintressen |
-| MB 4 kap | Kust, fjäll, älvar |\n\n- Totalförsvar har överordnad ställning (MB 3:10)"""
+    text = ("## Riksintressesystemet\n"
+            "| Kapitel | Innehåll |\n|---|---|\n"
+            "| MB 3 kap | Myndighetspekade riksintressen |\n"
+            "| MB 4 kap | Kust, fjäll, älvar |\n\n"
+            "- Totalförsvar har överordnad ställning (MB 3:10)")
     if fraga:
         text += f"\n\n### Din fråga: {fraga}"
     return text
@@ -143,7 +144,8 @@ TOOLS = {
         },
     },
     "analysera_konflikter_i_omrade": {
-        "fn": lambda p: analysera_konflikter_i_omrade(p["lat_min"], p["lon_min"], p["lat_max"], p["lon_max"]),
+        "fn": lambda p: analysera_konflikter_i_omrade(
+            p["lat_min"], p["lon_min"], p["lat_max"], p["lon_max"]),
         "description": "Identifiera riksintressekonflikter i ett område.",
         "inputSchema": {
             "type": "object",
@@ -157,7 +159,9 @@ TOOLS = {
     "forklara_riksintressesystemet": {
         "fn": lambda p: forklara_riksintressesystemet(p.get("fraga")),
         "description": "Förklarar riksintressesystemets rättsliga grund.",
-        "inputSchema": {"type": "object", "properties": {"fraga": {"type": "string"}}, "required": []},
+        "inputSchema": {"type": "object",
+                        "properties": {"fraga": {"type": "string"}},
+                        "required": []},
     },
 }
 
@@ -173,6 +177,11 @@ def cors(response):
 @app.route("/mcp", methods=["OPTIONS"])
 def mcp_preflight():
     return ("", 204)
+
+# Hälsokontroll som Intric kräver
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok"}), 200
 
 @app.route("/mcp", methods=["GET"])
 def mcp_healthcheck():
@@ -203,11 +212,12 @@ def mcp_endpoint():
         args   = params.get("arguments", {})
         if name not in TOOLS:
             return jsonify({"jsonrpc": "2.0", "id": req_id,
-                            "error": {"code": -32601, "message": f"Verktyg '{name}' finns inte"}})
+                            "error": {"code": -32601,
+                                      "message": f"Verktyg '{name}' finns inte"}})
         try:
             result_text = TOOLS[name]["fn"](args)
         except Exception as e:
-            result_text = f"⚠️ Fel: {e}"
+            result_text = f"Fel: {e}"
         return jsonify({"jsonrpc": "2.0", "id": req_id,
                         "result": {"content": [{"type": "text", "text": result_text}]}})
     return jsonify({"jsonrpc": "2.0", "id": req_id,
