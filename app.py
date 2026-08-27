@@ -73,20 +73,9 @@ def _grid_sample(lat_min, lon_min, lat_max, lon_max, steps=4):
 
 
 def _lookup_kommun(kommunnamn):
-    """Geokoda ett kommunnamn via Nominatim/OpenStreetMap."""
-    try:
-        r = requests.get(
-            "https://nominatim.openstreetmap.org/search",
-            params={"q": f"{kommunnamn} kommun, Sverige",
-                    "format": "json", "limit": 1},
-            headers={"User-Agent": "riksintresse-mcp/2.0"},
-            timeout=TIMEOUT,
-        )
-        r.raise_for_status()
-        res = r.json()
-        if not res:
-            return None
-        hit = res[0]
+    """Geokoda ett kommunnamn. Försöker Nominatim först, sedan Photon som fallback."""
+
+    def _parse_nominatim(hit):
         bb = hit.get("boundingbox", [])
         if len(bb) == 4:
             lat_min, lat_max = float(bb[0]), float(bb[1])
@@ -101,8 +90,51 @@ def _lookup_kommun(kommunnamn):
             "lat_min": lat_min, "lat_max": lat_max,
             "lon_min": lon_min, "lon_max": lon_max,
         }
+
+    # 1. Nominatim – med korrekt User-Agent och countrycodes-filter
+    try:
+        r = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": f"{kommunnamn} kommun, Sverige",
+                    "format": "json", "limit": 1,
+                    "countrycodes": "se", "addressdetails": "0"},
+            headers={"User-Agent": "riksintresse-mcp/2.0 (riksintresse-utredning)",
+                     "Accept": "application/json",
+                     "Accept-Language": "sv"},
+            timeout=TIMEOUT,
+        )
+        r.raise_for_status()
+        res = r.json()
+        if res:
+            return _parse_nominatim(res[0])
+    except requests.RequestException:
+        pass  # Fortsätt till Photon
+
+    # 2. Photon (OSM-baserad, mer tillåtande policy)
+    try:
+        r = requests.get(
+            "https://photon.komoot.io/api/",
+            params={"q": f"{kommunnamn} kommun Sverige", "limit": 5, "lang": "sv"},
+            headers={"User-Agent": "riksintresse-mcp/2.0"},
+            timeout=TIMEOUT,
+        )
+        r.raise_for_status()
+        for feat in r.json().get("features", []):
+            props = feat.get("properties", {})
+            if props.get("country_code", "").lower() != "se":
+                continue
+            lon, lat = feat["geometry"]["coordinates"]
+            ext = feat.get("extent", [lon - 0.3, lat - 0.2, lon + 0.3, lat + 0.2])
+            return {
+                "display": props.get("name", kommunnamn),
+                "lat": lat, "lon": lon,
+                "lat_min": ext[1], "lat_max": ext[3],
+                "lon_min": ext[0], "lon_max": ext[2],
+            }
     except requests.RequestException as e:
         return {"_error": str(e)}
+
+    return None
 
 
 def _format_attrs(attrs):
