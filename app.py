@@ -10,6 +10,9 @@ BOVERKET_BASE = (
 )
 TIMEOUT = 20
 
+# Global session för att återanvända TCP-anslutningar och minska latens/timeouts
+session = requests.Session()
+
 RIKSINTRESSE_TYPER = {
     "Totalförsvar":           ("Försvarsmakten / MSB",         "MB 3:9"),
     "Kommunikationer":        ("Trafikverket",                  "MB 3:8"),
@@ -30,7 +33,6 @@ RIKSINTRESSE_TYPER = {
     "Älvar":                  ("Riksdagen",                     "MB 4:6"),
 }
 
-
 # ── Interna hjälpfunktioner ───────────────────────────────────────────────────
 
 def _identify(lat, lon):
@@ -42,7 +44,8 @@ def _identify(lat, lon):
         "imageDisplay": "800,600,96", "returnGeometry": "false",
     }
     try:
-        r = requests.get(f"{BOVERKET_BASE}/identify", params=params, timeout=TIMEOUT)
+        # Använder session istället för requests.get för prestanda
+        r = session.get(f"{BOVERKET_BASE}/identify", params=params, timeout=TIMEOUT)
         r.raise_for_status()
         return r.json().get("results", [])
     except requests.RequestException as e:
@@ -50,12 +53,7 @@ def _identify(lat, lon):
 
 
 def _grid_sample(lat_min, lon_min, lat_max, lon_max, steps=4):
-    """Scanna ett bounding box med ett steps×steps rutnät.
-
-    Returnerar en dedupliserad lista av features – max ett objekt per
-    unik layerName – vilket löser den statistiska svagheten i den gamla
-    5-punkts-samplingen.
-    """
+    """Scanna ett bounding box med ett steps×steps rutnät."""
     lat_step = (lat_max - lat_min) / max(steps - 1, 1)
     lon_step = (lon_max - lon_min) / max(steps - 1, 1)
     seen, out = set(), []
@@ -74,10 +72,11 @@ def _grid_sample(lat_min, lon_min, lat_max, lon_max, steps=4):
 
 def _lookup_kommun(kommunnamn):
     """Geokoda ett kommunnamn. Försöker Nominatim först, sedan Photon som fallback."""
-
+    
     def _parse_nominatim(hit):
         bb = hit.get("boundingbox", [])
         if len(bb) == 4:
+            # Nominatim bb är [lat_min, lat_max, lon_min, lon_max]
             lat_min, lat_max = float(bb[0]), float(bb[1])
             lon_min, lon_max = float(bb[2]), float(bb[3])
         else:
@@ -91,16 +90,14 @@ def _lookup_kommun(kommunnamn):
             "lon_min": lon_min, "lon_max": lon_max,
         }
 
-    # 1. Nominatim – med korrekt User-Agent och countrycodes-filter
+    # 1. Nominatim
     try:
-        r = requests.get(
+        r = session.get(
             "https://nominatim.openstreetmap.org/search",
             params={"q": f"{kommunnamn} kommun, Sverige",
                     "format": "json", "limit": 1,
                     "countrycodes": "se", "addressdetails": "0"},
-            headers={"User-Agent": "riksintresse-mcp/2.0 (riksintresse-utredning)",
-                     "Accept": "application/json",
-                     "Accept-Language": "sv"},
+            headers={"User-Agent": "riksintresse-mcp/2.0 (riksintresse-utredning)"},
             timeout=TIMEOUT,
         )
         r.raise_for_status()
@@ -108,11 +105,11 @@ def _lookup_kommun(kommunnamn):
         if res:
             return _parse_nominatim(res[0])
     except requests.RequestException:
-        pass  # Fortsätt till Photon
+        pass
 
-    # 2. Photon (OSM-baserad, mer tillåtande policy)
+    # 2. Photon Fallback
     try:
-        r = requests.get(
+        r = session.get(
             "https://photon.komoot.io/api/",
             params={"q": f"{kommunnamn} kommun Sverige", "limit": 5, "lang": "sv"},
             headers={"User-Agent": "riksintresse-mcp/2.0"},
@@ -141,7 +138,6 @@ def _format_attrs(attrs):
     skip = {"objectid", "shape_area", "shape_length", "globalid"}
     return [f"  - **{k}**: {v}" for k, v in attrs.items()
             if v is not None and k.lower() not in skip]
-
 
 
 # ── Verktyg ───────────────────────────────────────────────────────────────────
@@ -189,7 +185,6 @@ def get_riksintressen_vid_koordinat(latitud, longitud):
 
 
 def analysera_konflikter_i_omrade(lat_min, lon_min, lat_max, lon_max, grid_steps=4):
-    """Uppgraderad till grid-sampling (steps×steps punkter) istället för 5."""
     features = _grid_sample(lat_min, lon_min, lat_max, lon_max, steps=grid_steps)
     layer_names = sorted({f.get("layerName", "Okänd") for f in features})
     n_pts = grid_steps ** 2
@@ -216,7 +211,6 @@ def analysera_konflikter_i_omrade(lat_min, lon_min, lat_max, lon_max, grid_steps
 
 
 def sampla_omrade_grid(lat_min, lon_min, lat_max, lon_max, grid_steps=4):
-    """Exponerar grid-samplingsresultaten direkt som ett fristående verktyg."""
     features = _grid_sample(lat_min, lon_min, lat_max, lon_max, steps=grid_steps)
     layer_names = sorted({f.get("layerName", "Okänd") for f in features})
     n_pts = grid_steps ** 2
@@ -231,7 +225,6 @@ def sampla_omrade_grid(lat_min, lon_min, lat_max, lon_max, grid_steps=4):
 
 
 def berakna_konfliktintensitet(lat_min, lon_min, lat_max, lon_max, grid_steps=4):
-    """Beräknar konfliktscore 0–10 baserat på antal intressen, par och totalförsvar."""
     features = _grid_sample(lat_min, lon_min, lat_max, lon_max, steps=grid_steps)
     layer_names = sorted({f.get("layerName", "Okänd") for f in features})
     n = len(layer_names)
@@ -241,11 +234,10 @@ def berakna_konfliktintensitet(lat_min, lon_min, lat_max, lon_max, grid_steps=4)
     pairs = list(combinations(layer_names, 2))
     has_forsvar = any("försvar" in ln.lower() for ln in layer_names)
 
-    # Poängmodell
-    score = min(n * 1.5, 6.0)           # Grundpoäng per riksintresse (max 6)
-    score += min(len(pairs) * 0.3, 3.0) # Parbonus (max 3)
+    score = min(n * 1.5, 6.0)           
+    score += min(len(pairs) * 0.3, 3.0) 
     if has_forsvar:
-        score = max(score, 9.0)         # Totalförsvar → minst 9
+        score = max(score, 9.0)         
     score = min(round(score, 1), 10.0)
 
     if score >= 9:   lvl, em = "Maximal",  "🔴"
@@ -265,8 +257,10 @@ def berakna_konfliktintensitet(lat_min, lon_min, lat_max, lon_max, grid_steps=4)
     return "\n".join(lines)
 
 
-def sok_riksintressen_i_kommun(kommunnamn, grid_steps=4):
-    """Geokoda kommunnamn automatiskt och kör riksintresseanalys."""
+def sok_riksintressen_i_kommun(kommunnamn, grid_steps=2):
+    """Geokoda kommunnamn och kör analys. 
+    Default grid_steps sänkt till 2 för att undvika timeouts vid stora kommuner.
+    """
     info = _lookup_kommun(kommunnamn)
     if info is None:
         return f"Hittade ingen kommun med namnet '{kommunnamn}'."
@@ -284,10 +278,8 @@ def sok_riksintressen_i_kommun(kommunnamn, grid_steps=4):
         info["lat_max"], info["lon_max"],
         grid_steps=grid_steps,
     )
-    # Plocka bort dubbel-rubriken från sub-funktionen
     body = "\n".join(analys.splitlines()[1:])
     return header + body
-
 
 
 def forklara_riksintressesystemet(fraga=None):
@@ -365,7 +357,7 @@ TOOLS = {
     },
     "sok_riksintressen_i_kommun": {
         "fn": lambda p: sok_riksintressen_i_kommun(
-            p["kommunnamn"], p.get("grid_steps", 4)),
+            p["kommunnamn"], p.get("grid_steps", 2)),
         "description": (
             "Sök riksintressen i en svensk kommun via kommunnamn. "
             "Geokodning sker automatiskt – koordinater behövs inte."
@@ -375,7 +367,7 @@ TOOLS = {
             "properties": {
                 "kommunnamn": {"type": "string",
                                "description": "Kommunens namn, t.ex. 'Kiruna'."},
-                "grid_steps": {"type": "integer", "default": 4},
+                "grid_steps": {"type": "integer", "default": 2},
             },
             "required": ["kommunnamn"],
         },
